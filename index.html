@@ -62,6 +62,12 @@ var state = {
   data: { trafficSpeed: 0.6, rainfall: 0, psi: 0.15, temperature: 0.6, busActivity: 0.5, portActivity: 0.7, timeOfDay: 0.5, humidity: 0.5 },
   frame: 0, ready: false
 };
+// API fetch state
+var cachedApi = null;
+var apiFetchInterval = 60000;
+var lastApiFetch = 0;
+var apiFetching = false;
+
 var presets = {
   day: { trafficSpeed: 0.7, rainfall: 0, psi: 0.15, temperature: 0.7, busActivity: 0.6, portActivity: 0.7, timeOfDay: 0.5, humidity: 0.5 },
   rush: { trafficSpeed: 0.15, rainfall: 0, psi: 0.3, temperature: 0.65, busActivity: 1.0, portActivity: 0.7, timeOfDay: 0.35, humidity: 0.6 },
@@ -119,6 +125,103 @@ function formatSGTime(h) {
   var ampm = hr >= 12 ? 'PM' : 'AM';
   var h12 = hr % 12 || 12;
   return h12 + ':' + (min < 10 ? '0' : '') + min + ' ' + ampm + ' SGT';
+}
+
+// ============================================================
+// LIVE API FETCH + MAPPING
+// ============================================================
+function fetchWeather() {
+  if (apiFetching) return;
+  apiFetching = true;
+  fetch('/api/weather')
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(json) {
+      if (json.ok && json.processed) {
+        cachedApi = json.processed;
+      }
+    })
+    .catch(function(err) {
+      console.warn('Weather API fetch failed, using simulation:', err.message);
+    })
+    .finally(function() {
+      apiFetching = false;
+      lastApiFetch = Date.now();
+    });
+}
+
+function mapApiToJellyfish(api, h) {
+  var tod = h / 24;
+
+  // Temperature: Singapore 22-35C -> 0.1-0.95
+  var tempC = api.temperature ? api.temperature.value : null;
+  var temperature = tempC !== null ? clamp((tempC - 22) / (35 - 22), 0.1, 0.95) : null;
+
+  // Humidity: 40-100% -> 0.3-0.95
+  var humVal = api.humidity ? api.humidity.value : null;
+  var humidity = humVal !== null ? clamp((humVal - 40) / (100 - 40), 0.3, 0.95) : null;
+
+  // Rainfall: max station reading, 0-30mm -> 0-0.9
+  var rainMax = api.rainfall ? api.rainfall.max : null;
+  var rainfall = rainMax !== null ? clamp(rainMax / 30, 0, 0.9) : null;
+
+  // PSI: 24-hour national, 0-200 -> 0.02-0.4
+  var psiNational = null;
+  if (api.psi && api.psi.psi_twenty_four_hourly) {
+    var psiData = api.psi.psi_twenty_four_hourly;
+    psiNational = psiData.national;
+    if (psiNational === undefined) {
+      var vals = [psiData.north, psiData.south, psiData.east, psiData.west, psiData.central].filter(function(v) { return v != null; });
+      if (vals.length > 0) psiNational = vals.reduce(function(a, b) { return a + b; }, 0) / vals.length;
+    }
+  }
+  var psi = psiNational !== null ? clamp(psiNational / 500, 0.02, 0.4) : null;
+
+  // Wind + UV for display
+  var windKnots = api.wind ? api.wind.avg : null;
+  var uvVal = api.uv ? api.uv.value : null;
+
+  // Simulated fields (no real API data yet)
+  var rushMorn = Math.exp(-Math.pow(h - 8.5, 2) / 2) * 0.9;
+  var rushEve = Math.exp(-Math.pow(h - 18, 2) / 2.5) * 0.85;
+  var lunchRush = Math.exp(-Math.pow(h - 12.5, 2) / 1.5) * 0.3;
+  var congestion = Math.max(rushMorn, rushEve, lunchRush, 0.05);
+  var trafficSpeed = clamp(1 - congestion, 0.08, 0.95);
+  var busActivity = Math.max(
+    Math.exp(-Math.pow(h - 8, 2) / 3) * 0.95,
+    Math.exp(-Math.pow(h - 18, 2) / 3) * 0.9,
+    Math.exp(-Math.pow(h - 12.5, 2) / 2) * 0.5,
+    h >= 23 || h < 5 ? 0.05 : 0.2
+  );
+  var portActivity = h >= 7 && h <= 20 ? lerp(0.5, 0.85, Math.sin((h - 7) / 13 * Math.PI)) : rand(0.2, 0.4);
+
+  // Fallback to simulation for any missing API fields
+  var sim = generateLiveData();
+
+  var data = {
+    trafficSpeed: trafficSpeed,
+    rainfall:     rainfall    !== null ? rainfall    : sim.data.rainfall,
+    psi:          psi         !== null ? psi         : sim.data.psi,
+    temperature:  temperature !== null ? temperature : sim.data.temperature,
+    busActivity:  busActivity,
+    portActivity: portActivity,
+    timeOfDay:    tod,
+    humidity:     humidity    !== null ? humidity    : sim.data.humidity
+  };
+
+  var raw = {
+    temperature: tempC !== null ? tempC.toFixed(1) + '\u00B0C' : sim.raw.temperature,
+    humidity:    humVal !== null ? Math.round(humVal) + '%' : sim.raw.humidity,
+    rainfall:    rainMax !== null ? (rainMax > 0.1 ? rainMax.toFixed(1) + 'mm' : 'dry') : sim.raw.rainfall,
+    psi: psiNational !== null ? 'PSI ' + Math.round(psiNational) : sim.raw.psi
+  };
+
+  if (windKnots !== null) raw.wind = windKnots.toFixed(1) + ' kt';
+  if (uvVal !== null && uvVal > 0) raw.uv = 'UV ' + uvVal;
+
+  return { data: data, raw: raw, hour: h };
 }
 
 // ============================================================
@@ -372,15 +475,49 @@ document.getElementById('btnAudio').addEventListener('click', function() {
 // DATA TICK + START
 // ============================================================
 function tick() {
-  var gen = generateLiveData();
+  var h = getSGHour();
+
+  // Trigger API fetch every 60s
+  if (Date.now() - lastApiFetch >= apiFetchInterval) {
+    fetchWeather();
+  }
+
+  // Use real API data when available, fall back to simulation
+  var gen;
+  if (cachedApi) {
+    gen = mapApiToJellyfish(cachedApi, h);
+  } else {
+    gen = generateLiveData();
+  }
+
   liveData = gen.data;
   clockEl.textContent = formatSGTime(gen.hour);
+
+  // Data source indicator: green = live API, purple = simulated
+  var dotEl = document.getElementById('dot');
+  if (cachedApi) {
+    dotEl.style.background = '#4cdd8b';
+    dotEl.style.boxShadow = '0 0 8px rgba(76,221,139,0.6)';
+  } else {
+    dotEl.style.background = '#8b7cdd';
+    dotEl.style.boxShadow = '0 0 8px rgba(139,124,221,0.6)';
+  }
+
+  // Update readings display
   readingsEl.innerHTML = '';
-  if (gen.raw.temperature) { var d = document.createElement('div'); d.textContent = gen.raw.temperature; readingsEl.appendChild(d); }
-  if (gen.raw.humidity) { var d = document.createElement('div'); d.textContent = gen.raw.humidity; readingsEl.appendChild(d); }
-  if (gen.raw.rainfall) { var d = document.createElement('div'); d.textContent = gen.raw.rainfall; readingsEl.appendChild(d); }
-  if (gen.raw.psi) { var d = document.createElement('div'); d.textContent = gen.raw.psi; readingsEl.appendChild(d); }
+  var fields = [gen.raw.temperature, gen.raw.humidity, gen.raw.rainfall, gen.raw.psi];
+  if (gen.raw.wind) fields.push(gen.raw.wind);
+  if (gen.raw.uv) fields.push(gen.raw.uv);
+  for (var i = 0; i < fields.length; i++) {
+    if (fields[i]) {
+      var d = document.createElement('div');
+      d.textContent = fields[i];
+      readingsEl.appendChild(d);
+    }
+  }
 }
+// Initial API fetch on page load
+fetchWeather();
 tick();
 setInterval(tick, 5000);
 updateUI();

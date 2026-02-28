@@ -48,32 +48,32 @@ module.exports = async function handler(req, res) {
     // Process into simple values for the jellyfish
     const processed = {};
 
-    // Temperature
+    // Temperature (station-based: data.readings[0].data)
     try {
-      const items = result.temperature?.data?.items;
-      if (items && items[0] && items[0].readings) {
-        const rd = items[0].readings;
+      const readings = result.temperature?.data?.readings;
+      if (readings && readings[0] && readings[0].data) {
+        const rd = readings[0].data;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         processed.temperature = { value: Math.round(avg * 10) / 10, unit: "°C", stations: rd.length };
       }
     } catch (e) {}
 
-    // Rainfall
+    // Rainfall (station-based: data.readings[0].data)
     try {
-      const items = result.rainfall?.data?.items;
-      if (items && items[0] && items[0].readings) {
-        const rd = items[0].readings;
+      const readings = result.rainfall?.data?.readings;
+      if (readings && readings[0] && readings[0].data) {
+        const rd = readings[0].data;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         const max = Math.max(...rd.map(x => x.value));
         processed.rainfall = { avg: Math.round(avg * 10) / 10, max: max, unit: "mm", stations: rd.length };
       }
     } catch (e) {}
 
-    // Humidity
+    // Humidity (station-based: data.readings[0].data)
     try {
-      const items = result.humidity?.data?.items;
-      if (items && items[0] && items[0].readings) {
-        const rd = items[0].readings;
+      const readings = result.humidity?.data?.readings;
+      if (readings && readings[0] && readings[0].data) {
+        const rd = readings[0].data;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         processed.humidity = { value: Math.round(avg), unit: "%", stations: rd.length };
       }
@@ -100,17 +100,17 @@ module.exports = async function handler(req, res) {
       }
     } catch (e) {}
 
-    // Wind
+    // Wind (station-based: data.readings[0].data)
     try {
-      const items = result.wind?.data?.items;
-      if (items && items[0] && items[0].readings) {
-        const rd = items[0].readings;
+      const readings = result.wind?.data?.readings;
+      if (readings && readings[0] && readings[0].data) {
+        const rd = readings[0].data;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         processed.wind = { avg: Math.round(avg * 10) / 10, unit: "knots", stations: rd.length };
       }
     } catch (e) {}
 
-    // UV
+    // UV (region-based: data.items)
     try {
       const items = result.uv?.data?.items;
       if (items && items[0]) {
