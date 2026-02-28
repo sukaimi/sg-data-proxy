@@ -50,9 +50,9 @@ module.exports = async function handler(req, res) {
 
     // Temperature
     try {
-      const readings = result.temperature?.data?.readings;
-      if (readings && readings[0] && readings[0].data) {
-        const rd = readings[0].data;
+      const items = result.temperature?.data?.items;
+      if (items && items[0] && items[0].readings) {
+        const rd = items[0].readings;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         processed.temperature = { value: Math.round(avg * 10) / 10, unit: "°C", stations: rd.length };
       }
@@ -60,9 +60,9 @@ module.exports = async function handler(req, res) {
 
     // Rainfall
     try {
-      const readings = result.rainfall?.data?.readings;
-      if (readings && readings[0] && readings[0].data) {
-        const rd = readings[0].data;
+      const items = result.rainfall?.data?.items;
+      if (items && items[0] && items[0].readings) {
+        const rd = items[0].readings;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         const max = Math.max(...rd.map(x => x.value));
         processed.rainfall = { avg: Math.round(avg * 10) / 10, max: max, unit: "mm", stations: rd.length };
@@ -71,9 +71,9 @@ module.exports = async function handler(req, res) {
 
     // Humidity
     try {
-      const readings = result.humidity?.data?.readings;
-      if (readings && readings[0] && readings[0].data) {
-        const rd = readings[0].data;
+      const items = result.humidity?.data?.items;
+      if (items && items[0] && items[0].readings) {
+        const rd = items[0].readings;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         processed.humidity = { value: Math.round(avg), unit: "%", stations: rd.length };
       }
@@ -102,9 +102,9 @@ module.exports = async function handler(req, res) {
 
     // Wind
     try {
-      const readings = result.wind?.data?.readings;
-      if (readings && readings[0] && readings[0].data) {
-        const rd = readings[0].data;
+      const items = result.wind?.data?.items;
+      if (items && items[0] && items[0].readings) {
+        const rd = items[0].readings;
         const avg = rd.reduce((s, x) => s + x.value, 0) / rd.length;
         processed.wind = { avg: Math.round(avg * 10) / 10, unit: "knots", stations: rd.length };
       }

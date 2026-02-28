@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pulse of Singapore</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #020414; font-family: 'Courier New', monospace; }
+#wrap { width: 100%; height: 100%; display: flex; flex-direction: column; }
+#stage { flex: 1; position: relative; cursor: crosshair; }
+canvas { width: 100%; height: 100%; display: block; }
+#hud { position: absolute; top: 20px; left: 24px; pointer-events: none; }
+#title { color: rgba(140,120,220,0.2); font-size: 11px; letter-spacing: 5px; font-weight: 300; }
+#clock-wrap { margin-top: 8px; display: flex; align-items: center; gap: 6px; }
+#dot { width: 6px; height: 6px; border-radius: 50%; background: #8b7cdd; box-shadow: 0 0 8px rgba(139,124,221,0.6); }
+#clock { color: rgba(140,120,220,0.35); font-size: 9px; letter-spacing: 1px; }
+#readings { position: absolute; bottom: 60px; right: 24px; color: rgba(140,120,220,0.18); font-size: 9px; letter-spacing: 1px; text-align: right; line-height: 1.9; pointer-events: none; }
+#bar { padding: 10px 20px; display: flex; gap: 5px; align-items: center; background: rgba(2,4,20,0.97); border-top: 1px solid rgba(100,80,180,0.06); flex-wrap: wrap; }
+.btn { padding: 5px 12px; font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; background: transparent; border: 1px solid rgba(255,255,255,0.04); border-radius: 3px; color: rgba(120,120,160,0.3); cursor: pointer; transition: all 0.4s; font-family: inherit; }
+.btn.on { background: rgba(120,100,220,0.1); border-color: rgba(120,100,220,0.3); color: rgba(180,160,255,0.85); }
+.sep { width: 1px; height: 16px; background: rgba(255,255,255,0.06); margin: 0 6px; }
+.spacer { flex: 1; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hud">
+      <div id="title">PULSE OF SINGAPORE</div>
+      <div id="clock-wrap"><div id="dot"></div><span id="clock"></span></div>
+    </div>
+    <div id="readings"></div>
+  </div>
+  <div id="bar">
+    <button class="btn on" id="btnLive">&#9679; Singapore Now</button>
+    <button class="btn" id="btnSim">Simulate</button>
+    <div id="simBtns" style="display:none;"></div>
+    <div class="spacer"></div>
+    <button class="btn" id="btnAudio">&#9834; Off</button>
+  </div>
+</div>
+<script>
+// ============================================================
+// GLOBALS
+// ============================================================
+var TAU = Math.PI * 2;
+function lerp(a, b, t) { return a + (b - a) * t; }
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function clamp(v, mn, mx) { return Math.min(Math.max(v, mn), mx); }
+
+var canvas = document.getElementById('c');
+var cc = canvas.getContext('2d');
+var mode = 'live';
+var scenario = 'day';
+var audioOn = false;
+var mouse = { x: null, y: null };
+var liveData = null;
+var state = {
+  jf: [], snow: [],
+  data: { trafficSpeed: 0.6, rainfall: 0, psi: 0.15, temperature: 0.6, busActivity: 0.5, portActivity: 0.7, timeOfDay: 0.5, humidity: 0.5 },
+  frame: 0, ready: false
+};
+var presets = {
+  day: { trafficSpeed: 0.7, rainfall: 0, psi: 0.15, temperature: 0.7, busActivity: 0.6, portActivity: 0.7, timeOfDay: 0.5, humidity: 0.5 },
+  rush: { trafficSpeed: 0.15, rainfall: 0, psi: 0.3, temperature: 0.65, busActivity: 1.0, portActivity: 0.7, timeOfDay: 0.35, humidity: 0.6 },
+  rain: { trafficSpeed: 0.3, rainfall: 0.85, psi: 0.1, temperature: 0.4, busActivity: 0.4, portActivity: 0.5, timeOfDay: 0.55, humidity: 0.95 },
+  haze: { trafficSpeed: 0.5, rainfall: 0, psi: 0.9, temperature: 0.8, busActivity: 0.3, portActivity: 0.6, timeOfDay: 0.5, humidity: 0.4 },
+  night: { trafficSpeed: 0.85, rainfall: 0, psi: 0.1, temperature: 0.35, busActivity: 0.1, portActivity: 0.85, timeOfDay: 0.95, humidity: 0.7 }
+};
+
+// ============================================================
+// TIME-BASED SINGAPORE SIMULATION
+// ============================================================
+function getSGHour() {
+  var n = new Date();
+  return ((n.getUTCHours() + 8) % 24) + n.getUTCMinutes() / 60;
+}
+
+function generateLiveData() {
+  var h = getSGHour();
+  var tod = h / 24;
+  var rushMorn = Math.exp(-Math.pow(h - 8.5, 2) / 2) * 0.9;
+  var rushEve = Math.exp(-Math.pow(h - 18, 2) / 2.5) * 0.85;
+  var lunchRush = Math.exp(-Math.pow(h - 12.5, 2) / 1.5) * 0.3;
+  var congestion = Math.max(rushMorn, rushEve, lunchRush, 0.05);
+  var trafficSpeed = clamp(1 - congestion, 0.08, 0.95);
+  var busActivity = Math.max(
+    Math.exp(-Math.pow(h - 8, 2) / 3) * 0.95,
+    Math.exp(-Math.pow(h - 18, 2) / 3) * 0.9,
+    Math.exp(-Math.pow(h - 12.5, 2) / 2) * 0.5,
+    h >= 23 || h < 5 ? 0.05 : 0.2
+  );
+  var tempBase = Math.sin((h - 6) / 24 * Math.PI) * 0.5 + 0.5;
+  var temperature = clamp(h >= 5 && h <= 18 ? lerp(0.25, 0.85, tempBase) : lerp(0.15, 0.35, 1 - Math.abs(h > 18 ? (h - 24) : h) / 6), 0.1, 0.95);
+  var humidity = clamp(1 - temperature * 0.6 + 0.2 + Math.sin(h * 0.3) * 0.1, 0.3, 0.95);
+  var mins = new Date().getMinutes();
+  var rainSeed = Math.sin(mins * 0.5 + Math.floor(h)) * 0.5 + 0.5;
+  var afternoonBias = Math.exp(-Math.pow(h - 16, 2) / 8) * 0.7;
+  var rainfall = rainSeed < (0.3 + afternoonBias) ? clamp(afternoonBias * rainSeed * 2, 0, 0.9) : 0;
+  var psiBase = lerp(0.08, 0.25, congestion);
+  var psi = clamp(psiBase + Math.sin(mins * 0.2) * 0.05, 0.02, 0.4);
+  var portActivity = h >= 7 && h <= 20 ? lerp(0.5, 0.85, Math.sin((h - 7) / 13 * Math.PI)) : rand(0.2, 0.4);
+  var tempC = lerp(23, 34, temperature).toFixed(1);
+  var humPct = Math.round(lerp(55, 98, humidity));
+  var rainMm = (rainfall * 30).toFixed(1);
+  var psiVal = Math.round(lerp(10, 80, psi));
+  return {
+    data: { trafficSpeed: trafficSpeed, rainfall: rainfall, psi: psi, temperature: temperature, busActivity: busActivity, portActivity: portActivity, timeOfDay: tod, humidity: humidity },
+    raw: { temperature: tempC + '\u00B0C', humidity: humPct + '%', rainfall: rainfall > 0.01 ? rainMm + 'mm' : 'dry', psi: 'PSI ' + psiVal },
+    hour: h
+  };
+}
+
+function formatSGTime(h) {
+  var hr = Math.floor(h) % 24;
+  var min = Math.floor((h % 1) * 60);
+  var ampm = hr >= 12 ? 'PM' : 'AM';
+  var h12 = hr % 12 || 12;
+  return h12 + ':' + (min < 10 ? '0' : '') + min + ' ' + ampm + ' SGT';
+}
+
+// ============================================================
+// AUDIO
+// ============================================================
+var audio = (function() {
+  var ctx = null, masterGain = null, droneGain = null, osc1 = null, osc2 = null, osc3 = null, ready = false, currentFreq = 55;
+  function init() {
+    if (ready) return true;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      ctx = new AC();
+      masterGain = ctx.createGain(); masterGain.gain.value = 0.3; masterGain.connect(ctx.destination);
+      var filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 200; filt.Q.value = 2; filt.connect(masterGain);
+      droneGain = ctx.createGain(); droneGain.gain.value = 0.15; droneGain.connect(filt);
+      osc1 = ctx.createOscillator(); osc1.type = 'sine'; osc1.frequency.value = 55; osc1.connect(droneGain); osc1.start();
+      osc2 = ctx.createOscillator(); osc2.type = 'sine'; osc2.frequency.value = 82.5;
+      var g2 = ctx.createGain(); g2.gain.value = 0.06; osc2.connect(g2); g2.connect(filt); osc2.start();
+      osc3 = ctx.createOscillator(); osc3.type = 'triangle'; osc3.frequency.value = 110;
+      var g3 = ctx.createGain(); g3.gain.value = 0.03; osc3.connect(g3); g3.connect(filt); osc3.start();
+      var lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 0.15;
+      var lg = ctx.createGain(); lg.gain.value = 3; lfo.connect(lg); lg.connect(osc1.frequency); lfo.start();
+      ready = true; return true;
+    } catch (e) { return false; }
+  }
+  function updateDrone(ts) {
+    if (!ready) return;
+    try { var tgt = lerp(40, 75, 1 - ts); currentFreq = lerp(currentFreq, tgt, 0.01); var t = ctx.currentTime; osc1.frequency.setTargetAtTime(currentFreq, t, 0.5); osc2.frequency.setTargetAtTime(currentFreq * 1.5, t, 0.5); osc3.frequency.setTargetAtTime(currentFreq * 2, t, 0.5); droneGain.gain.setTargetAtTime(lerp(0.08, 0.2, 1 - ts), t, 0.3); } catch (e) {}
+  }
+  function playBubble() {
+    if (!ready) return;
+    try { var o = ctx.createOscillator(), g = ctx.createGain(), f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = rand(600, 1800); f.Q.value = 8; o.type = 'sine'; o.frequency.value = rand(400, 1200); o.frequency.setTargetAtTime(rand(200, 600), ctx.currentTime, 0.05); g.gain.value = rand(0.02, 0.06); g.gain.setTargetAtTime(0, ctx.currentTime, rand(0.05, 0.15)); o.connect(f); f.connect(g); g.connect(masterGain); o.start(); o.stop(ctx.currentTime + 0.3); } catch (e) {}
+  }
+  function playPulse() {
+    if (!ready) return;
+    try { var t = ctx.currentTime; var o = ctx.createOscillator(), g = ctx.createGain(); o.type = 'sine'; o.frequency.value = rand(80, 160); o.frequency.setTargetAtTime(rand(40, 80), t, 0.2); g.gain.value = 0.12; g.gain.setTargetAtTime(0, t, 0.4); o.connect(g); g.connect(masterGain); o.start(); o.stop(t + 0.8); var s = ctx.createOscillator(), sg = ctx.createGain(); s.type = 'sine'; s.frequency.value = 45; sg.gain.value = 0.15; sg.gain.setTargetAtTime(0, t, 0.6); s.connect(sg); sg.connect(masterGain); s.start(); s.stop(t + 1); } catch (e) {}
+  }
+  return { init: init, updateDrone: updateDrone, playBubble: playBubble, playPulse: playPulse };
+})();
+
+// ============================================================
+// PHYSICS + CREATURES
+// ============================================================
+function TP(x, y) { this.x = x; this.y = y; this.vx = 0; this.vy = 0; this.tx = x; this.ty = y; }
+TP.prototype.update = function(d, s) { this.vx += (this.tx - this.x) * s; this.vy += (this.ty - this.y) * s; this.vx *= d; this.vy *= d; this.x += this.vx; this.y += this.vy; };
+
+function Jellyfish(o) {
+  this.x = o.x; this.y = o.y; this.size = o.size; this.opacity = o.opacity || 1;
+  this.detail = o.detail || 'full'; this.layer = o.layer || 0;
+  this.driftX = o.driftX || 0; this.driftY = o.driftY || 0;
+  this.breathSpeed = o.breathSpeed || rand(0.014, 0.024);
+  this.breathPhase = rand(0, TAU); this.swayPhase = rand(0, TAU);
+  this.swayAmt = o.swayAmt || rand(0.5, 2); this.bobPhase = rand(0, TAU);
+  this.bobSpeed = rand(0.004, 0.01); this.bobAmt = o.bobAmt || rand(8, 25);
+  this.hueBase = o.hue || 260; this.lobes = 8;
+  this.oralArms = []; this.outerTendrils = []; this.feedingTendrils = [];
+  var i, j, segs, pts, spread, len;
+  if (this.detail === 'full') {
+    for (i = 0; i < 4; i++) { segs = 18; pts = []; spread = (i / 3 - 0.5) * this.size * 0.6; for (j = 0; j < segs; j++) pts.push(new TP(this.x + spread, this.y + (j / (segs - 1)) * this.size * 2.8)); this.oralArms.push({ points: pts, spread: spread, swayOff: rand(0, TAU), width: rand(3, 5) * (this.size / 100), alpha: rand(0.3, 0.5), len: 2.8 }); }
+    for (i = 0; i < 28; i++) { segs = 12; pts = []; spread = (i / 27 - 0.5) * this.size * 1.6; len = rand(2.5, 4.5); for (j = 0; j < segs; j++) pts.push(new TP(this.x + spread, this.y + (j / (segs - 1)) * this.size * len)); this.outerTendrils.push({ points: pts, spread: spread, swayOff: rand(0, TAU), width: rand(0.4, 1.2) * (this.size / 100), len: len, alpha: rand(0.15, 0.45) }); }
+    for (i = 0; i < 8; i++) { segs = 14; pts = []; spread = (i / 7 - 0.5) * this.size * 1.0; for (j = 0; j < segs; j++) pts.push(new TP(this.x + spread, this.y + (j / (segs - 1)) * this.size * 2.2)); this.feedingTendrils.push({ points: pts, spread: spread, swayOff: rand(0, TAU), width: rand(1.2, 2.2) * (this.size / 100), len: 2.2, alpha: rand(0.25, 0.5) }); }
+  } else {
+    var count = this.detail === 'medium' ? 10 : 4;
+    for (i = 0; i < count; i++) { segs = this.detail === 'medium' ? 10 : 6; pts = []; spread = (i / Math.max(count - 1, 1) - 0.5) * this.size * 1.2; len = rand(1.8, 3.0); for (j = 0; j < segs; j++) pts.push(new TP(this.x + spread, this.y + (j / (segs - 1)) * this.size * len)); this.outerTendrils.push({ points: pts, spread: spread, swayOff: rand(0, TAU), width: rand(0.5, 1.5) * (this.size / 100), len: len, alpha: rand(0.2, 0.5) }); }
+  }
+  this.nodes = [];
+  if (this.detail === 'full') for (i = 0; i < 10; i++) this.nodes.push({ tIdx: Math.floor(rand(0, this.feedingTendrils.length)), prog: rand(0.1, 0.9), spd: rand(0.001, 0.004) * (Math.random() > 0.5 ? 1 : -1), sz: rand(2, 5), pp: rand(0, TAU) });
+  this.portDots = [];
+  if (this.detail === 'full') for (i = 0; i < 14; i++) this.portDots.push({ ang: rand(0, TAU), spd: rand(0.004, 0.012) * (Math.random() > 0.5 ? 1 : -1), sz: rand(1.5, 3.5), al: rand(0.3, 0.8) });
+  this.organs = [];
+  if (this.detail === 'full') for (i = 0; i < 4; i++) this.organs.push({ ang: (i / 4) * TAU + Math.PI / 4, dist: 0.3, sz: 0.2, pp: rand(0, TAU) });
+  this.ripples = [];
+}
+Jellyfish.prototype.addRipple = function(rx, ry) { this.ripples.push({ x: rx, y: ry, r: 0, maxR: rand(30, 80), alpha: 0.6, speed: rand(0.8, 1.5) }); };
+Jellyfish.prototype._upT = function(arr, cx, cy, breath, frame, data, px, py) {
+  for (var ti = 0; ti < arr.length; ti++) { var t = arr[ti]; for (var pi = 0; pi < t.points.length; pi++) { var p = t.points[pi]; var f = pi / (t.points.length - 1); var sw = Math.sin(frame * 0.012 + t.swayOff + f * 2.5) * (12 + f * 30) * (this.size / 80); var sw2 = Math.sin(frame * 0.007 + t.swayOff * 2 + f * 1.8) * f * 15 * (this.size / 80); var rd = data ? data.rainfall * 35 * f * f : 0; var push = f * f; p.tx = cx + t.spread * (0.3 + f * 0.7) * breath + sw + sw2 + px * push * 30; p.ty = cy + f * this.size * (t.len || 2.5) + rd + py * push * 15; p.update(0.89 + f * 0.06, 0.015 + (1 - f) * 0.025); } }
+};
+Jellyfish.prototype.update = function(frame, data, W, H, mx, my) {
+  this.bobPhase += this.bobSpeed; this.breathPhase += this.breathSpeed; this.swayPhase += 0.007;
+  this.x += this.driftX; this.y += this.driftY;
+  var m = this.size * 5;
+  if (this.x < -m) this.x = W + m * 0.5; if (this.x > W + m) this.x = -m * 0.5;
+  if (this.y < -m) this.y = H + m * 0.5; if (this.y > H + m) this.y = -m * 0.5;
+  var bobY = Math.sin(this.bobPhase) * this.bobAmt;
+  var sway = Math.sin(this.swayPhase) * this.swayAmt;
+  var bm = this.detail === 'full' && data ? lerp(0.03, 0.08, data.busActivity) : 0.04;
+  var breath = Math.sin(this.breathPhase) * bm + 1;
+  var cx = this.x + sway, cy = this.y + bobY;
+  var px = 0, py = 0;
+  if (mx != null && this.detail === 'full') { var dx = cx - mx, dy = cy - my; var d = Math.sqrt(dx * dx + dy * dy); if (d < this.size * 3 && d > 0) { var force = (1 - d / (this.size * 3)) * 0.8; px = (dx / d) * force; py = (dy / d) * force * 0.3; } }
+  this._upT(this.oralArms, cx, cy, breath, frame, data, px, py);
+  this._upT(this.outerTendrils, cx, cy, breath, frame, data, px, py);
+  this._upT(this.feedingTendrils, cx, cy, breath, frame, data, px, py);
+  for (var i = 0; i < this.nodes.length; i++) { var n = this.nodes[i]; n.prog += (data ? n.spd * lerp(0.5, 2, data.trafficSpeed) : n.spd); if (n.prog > 0.9) n.spd = -Math.abs(n.spd); if (n.prog < 0.1) n.spd = Math.abs(n.spd); n.prog = clamp(n.prog, 0.05, 0.95); n.pp += 0.04; }
+  for (var pi2 = 0; pi2 < this.portDots.length; pi2++) this.portDots[pi2].ang += this.portDots[pi2].spd * (data ? lerp(0.5, 2, data.portActivity) : 1);
+  this.ripples = this.ripples.filter(function(r) { r.r += r.speed; r.alpha = 0.6 * (1 - r.r / r.maxR); return r.r < r.maxR; });
+  return { cx: cx, cy: cy, breath: breath };
+};
+Jellyfish.prototype.draw = function(c, frame, data, st) {
+  var cx = st.cx, cy = st.cy, breath = st.breath, s = this.size, op = this.opacity;
+  var hS = 0, sS = 0;
+  if (this.detail === 'full' && data) { hS = data.psi > 0.4 ? lerp(0, -70, clamp((data.psi - 0.4) / 0.6, 0, 1)) : 0; sS = data.psi > 0.5 ? -15 : 0; }
+  var hB = this.hueBase + hS, sat = clamp(65 + sS, 25, 90);
+  c.save(); c.globalAlpha = op;
+  var bH = s * 0.7 * breath, bW = s * breath;
+  var gR = s * 2.5;
+  var gl = c.createRadialGradient(cx, cy - bH * 0.3, s * 0.05, cx, cy - bH * 0.3, gR);
+  gl.addColorStop(0, 'hsla(' + (hB + 20) + ',' + sat + '%,55%,' + (0.1 * op) + ')');
+  gl.addColorStop(0.4, 'hsla(' + hB + ',' + sat + '%,40%,' + (0.04 * op) + ')');
+  gl.addColorStop(1, 'hsla(' + (hB - 20) + ',' + sat + '%,25%,0)');
+  c.fillStyle = gl; c.beginPath(); c.arc(cx, cy - bH * 0.3, gR, 0, TAU); c.fill();
+  var self = this;
+  var drawBell = function(inf, alpha, li) {
+    var w = bW * inf, bh = bH * inf;
+    c.beginPath();
+    for (var i = 0; i <= 64; i++) { var t = i / 64, angle = t * Math.PI; var lobeW = Math.cos(t * self.lobes * Math.PI) * 0.06 * breath; var wob = Math.sin(frame * 0.025 + t * 12) * 0.008; var r = 1 + lobeW + wob; var bx = cx + Math.cos(Math.PI + angle) * w * r; var by = cy - Math.sin(angle) * bh * r; if (i === 0) c.moveTo(bx, by); else c.lineTo(bx, by); }
+    for (var j = 0; j <= 32; j++) { var t2 = j / 32; var sx = cx + w * (1 - 2 * t2) * inf; var scallop = Math.sin(t2 * Math.PI * self.lobes * 2) * s * 0.035 * breath; c.lineTo(sx, cy + scallop + Math.sin(frame * 0.03 + t2 * 10) * s * 0.01); }
+    c.closePath(); c.fillStyle = 'hsla(' + (hB + 15) + ',' + (sat + 10) + '%,' + li + '%,' + alpha + ')'; c.fill();
+  };
+  drawBell(1.08, 0.025 * op, 50); drawBell(1.02, 0.06 * op, 45); drawBell(0.94, 0.1 * op, 55); drawBell(0.85, 0.06 * op, 60);
+  c.beginPath(); c.moveTo(cx - bW * 0.5, cy - bH * 0.78); c.bezierCurveTo(cx - bW * 0.2, cy - bH * 1.05, cx + bW * 0.2, cy - bH * 1.05, cx + bW * 0.35, cy - bH * 0.7);
+  c.strokeStyle = 'hsla(' + (hB + 40) + ',80%,80%,' + (0.2 * op) + ')'; c.lineWidth = 1.5 * (s / 80); c.stroke();
+  if (this.detail === 'full') {
+    for (var oi = 0; oi < this.organs.length; oi++) { var o = this.organs[oi]; var ox = cx + Math.cos(o.ang) * bW * o.dist; var oy = cy - bH * 0.4 + Math.sin(o.ang) * bH * o.dist * 0.4; var oSz = s * o.sz * breath; var p = Math.sin(o.pp + frame * 0.02) * 0.3 + 0.7; var oG = c.createRadialGradient(ox, oy, 0, ox, oy, oSz); oG.addColorStop(0, 'hsla(' + (hB - 50) + ',80%,55%,' + (0.15 * p * op) + ')'); oG.addColorStop(0.6, 'hsla(' + (hB - 30) + ',60%,45%,' + (0.06 * p * op) + ')'); oG.addColorStop(1, 'hsla(' + hB + ',' + sat + '%,35%,0)'); c.fillStyle = oG; c.beginPath(); c.ellipse(ox, oy, oSz, oSz * 0.65, o.ang, 0, TAU); c.fill(); }
+    var gP = Math.sin(frame * 0.03) * 0.3 + 0.8; var gG = c.createRadialGradient(cx, cy - bH * 0.38, 0, cx, cy - bH * 0.38, s * 0.22); gG.addColorStop(0, 'hsla(' + (hB + 30) + ',90%,85%,' + (0.25 * gP * op) + ')'); gG.addColorStop(0.4, 'hsla(' + hB + ',' + (sat + 20) + '%,65%,' + (0.1 * gP * op) + ')'); gG.addColorStop(1, 'hsla(' + (hB - 20) + ',' + sat + '%,40%,0)'); c.fillStyle = gG; c.beginPath(); c.arc(cx, cy - bH * 0.38, s * 0.22, 0, TAU); c.fill();
+  }
+  if (this.detail === 'full') for (var di = 0; di < this.portDots.length; di++) { var d = this.portDots[di]; var ddx = cx + Math.cos(d.ang) * bW * 1.02, ddy = cy + Math.sin(d.ang) * s * 0.05; c.fillStyle = 'hsla(' + (hB + 60) + ',90%,85%,' + (d.al * 0.8 * op) + ')'; c.beginPath(); c.arc(ddx, ddy, d.sz, 0, TAU); c.fill(); var pg = c.createRadialGradient(ddx, ddy, 0, ddx, ddy, d.sz * 5); pg.addColorStop(0, 'hsla(' + (hB + 60) + ',80%,75%,' + (d.al * 0.4 * op) + ')'); pg.addColorStop(1, 'hsla(' + (hB + 40) + ',60%,50%,0)'); c.fillStyle = pg; c.beginPath(); c.arc(ddx, ddy, d.sz * 5, 0, TAU); c.fill(); }
+  var drawSet = function(arr, hOff, sOff, lB) {
+    for (var ti = 0; ti < arr.length; ti++) { var t = arr[ti], pts = t.points; if (pts.length < 2) continue; c.beginPath(); c.moveTo(pts[0].x, pts[0].y); for (var i = 1; i < pts.length - 1; i++) c.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2); c.quadraticCurveTo(pts[pts.length - 2].x, pts[pts.length - 2].y, pts[pts.length - 1].x, pts[pts.length - 1].y); var gr = c.createLinearGradient(pts[0].x, pts[0].y, pts[pts.length - 1].x, pts[pts.length - 1].y); gr.addColorStop(0, 'hsla(' + (hB + hOff) + ',' + (sat + sOff) + '%,' + lB + '%,' + ((t.alpha || 0.4) * 0.7 * op) + ')'); gr.addColorStop(0.5, 'hsla(' + (hB + hOff + 15) + ',' + (sat + sOff) + '%,' + (lB - 8) + '%,' + ((t.alpha || 0.4) * 0.4 * op) + ')'); gr.addColorStop(1, 'hsla(' + (hB + hOff - 40) + ',' + sat + '%,' + (lB - 15) + '%,' + ((t.alpha || 0.4) * 0.04 * op) + ')'); c.strokeStyle = gr; c.lineWidth = t.width * breath; c.lineCap = 'round'; c.stroke(); }
+  };
+  drawSet(this.outerTendrils, 30, 15, 55); drawSet(this.feedingTendrils, 0, 5, 58); drawSet(this.oralArms, -30, 20, 62);
+  for (var ni = 0; ni < this.nodes.length; ni++) { var n = this.nodes[ni]; var t3 = this.feedingTendrils[n.tIdx]; if (!t3) continue; var pts2 = t3.points, idx = n.prog * (pts2.length - 1); var i0 = Math.floor(idx), i1 = Math.min(i0 + 1, pts2.length - 1), f2 = idx - i0; var nx = lerp(pts2[i0].x, pts2[i1].x, f2), ny = lerp(pts2[i0].y, pts2[i1].y, f2); var p2 = Math.sin(n.pp) * 0.4 + 0.8, nr = n.sz * p2; var nG = c.createRadialGradient(nx, ny, 0, nx, ny, nr * 8); nG.addColorStop(0, 'hsla(' + (hB + 50) + ',95%,85%,' + (0.5 * p2 * op) + ')'); nG.addColorStop(0.3, 'hsla(' + (hB + 30) + ',80%,65%,' + (0.15 * p2 * op) + ')'); nG.addColorStop(1, 'hsla(' + hB + ',' + sat + '%,40%,0)'); c.fillStyle = nG; c.beginPath(); c.arc(nx, ny, nr * 8, 0, TAU); c.fill(); c.fillStyle = 'hsla(' + (hB + 60) + ',95%,92%,' + (0.8 * p2 * op) + ')'; c.beginPath(); c.arc(nx, ny, nr, 0, TAU); c.fill(); }
+  for (var ri = 0; ri < this.ripples.length; ri++) { var r = this.ripples[ri]; c.strokeStyle = 'hsla(' + (hB + 40) + ',80%,75%,' + (r.alpha * op) + ')'; c.lineWidth = 1.5; c.beginPath(); c.arc(r.x, r.y, r.r, 0, TAU); c.stroke(); }
+  c.restore();
+};
+
+function Snow(W, H) { this.x = rand(0, W); this.y = rand(0, H); this.sz = rand(0.3, 1.8); this.al = rand(0.03, 0.12); this.sx = rand(-0.1, 0.1); this.sy = rand(-0.2, 0.06); this.W = W; this.H = H; }
+Snow.prototype.update = function() { this.x += this.sx; this.y += this.sy; if (this.y < -5) this.y = this.H + 5; if (this.y > this.H + 5) this.y = -5; if (this.x < -5) this.x = this.W + 5; if (this.x > this.W + 5) this.x = -5; };
+Snow.prototype.draw = function(c) { c.fillStyle = 'rgba(140,180,220,' + this.al + ')'; c.beginPath(); c.arc(this.x, this.y, this.sz, 0, TAU); c.fill(); };
+
+// ============================================================
+// SCENE INIT + RENDER LOOP
+// ============================================================
+function initScene(W, H) {
+  state.jf = []; var u = Math.min(W, H);
+  state.jf.push(new Jellyfish({ x: W * 0.48, y: H * 0.28, size: u * 0.15, opacity: 1, detail: 'full', breathSpeed: 0.016, swayAmt: 2, hue: 258, layer: 2, bobAmt: 18 }));
+  var meds = [{ x: 0.14, y: 0.2, s: 0.06, hue: 240, dx: 0.1, dy: -0.05 }, { x: 0.84, y: 0.42, s: 0.05, hue: 275, dx: -0.08, dy: -0.08 }, { x: 0.68, y: 0.1, s: 0.038, hue: 220, dx: -0.05, dy: 0.06 }];
+  for (var i = 0; i < meds.length; i++) { var m = meds[i]; state.jf.push(new Jellyfish({ x: W * m.x, y: H * m.y, size: u * m.s, opacity: rand(0.25, 0.45), detail: 'medium', driftX: m.dx, driftY: m.dy, breathSpeed: rand(0.012, 0.02), swayAmt: rand(1, 2.5), hue: m.hue, layer: 1 })); }
+  for (var si = 0; si < 6; si++) state.jf.push(new Jellyfish({ x: rand(W * 0.05, W * 0.95), y: rand(H * 0.05, H * 0.95), size: u * rand(0.014, 0.028), opacity: rand(0.06, 0.18), detail: 'minimal', driftX: rand(-0.15, 0.15), driftY: rand(-0.2, 0.04), breathSpeed: rand(0.01, 0.018), swayAmt: rand(0.5, 1.5), hue: rand(230, 280), layer: 0 }));
+  state.snow = []; for (var sn = 0; sn < Math.floor(W * H / 5000); sn++) state.snow.push(new Snow(W, H));
+  state.ready = true;
+}
+
+function drawFrame() {
+  var W = canvas.width, H = canvas.height;
+  if (!state.ready) initScene(W, H);
+  state.frame++;
+  var frame = state.frame;
+  var target;
+  if (mode === 'live' && liveData) target = liveData;
+  else target = presets[scenario] || presets.day;
+  var keys = Object.keys(target);
+  for (var ki = 0; ki < keys.length; ki++) { var k = keys[ki]; if (state.data[k] !== undefined) state.data[k] = lerp(state.data[k], target[k], 0.012); }
+  var data = state.data;
+  if (audioOn) audio.updateDrone(data.trafficSpeed);
+  var nF = Math.abs(data.timeOfDay - 0.5) * 2;
+  var bg = cc.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, 'rgb(' + Math.floor(lerp(4, 1, nF)) + ',' + Math.floor(lerp(6, 2, nF)) + ',' + Math.floor(lerp(22, 10, nF)) + ')');
+  bg.addColorStop(1, 'rgb(' + Math.floor(lerp(2, 0, nF)) + ',' + Math.floor(lerp(3, 1, nF)) + ',' + Math.floor(lerp(14, 6, nF)) + ')');
+  cc.fillStyle = bg; cc.fillRect(0, 0, W, H);
+  var cA = lerp(0.02, 0.003, nF);
+  for (var ci = 0; ci < 4; ci++) { var cx2 = W * 0.25 + Math.sin(frame * 0.005 + ci * 1.8) * W * 0.3; var cy2 = Math.sin(frame * 0.003 + ci * 2.3) * H * 0.06; var cr = W * 0.2; var cG = cc.createRadialGradient(cx2, cy2, 0, cx2, cy2, cr); cG.addColorStop(0, 'rgba(60,100,180,' + cA + ')'); cG.addColorStop(1, 'rgba(30,60,120,0)'); cc.fillStyle = cG; cc.beginPath(); cc.arc(cx2, cy2, cr, 0, TAU); cc.fill(); }
+  if (data.psi > 0.3) { cc.fillStyle = 'rgba(90,75,40,' + ((data.psi - 0.3) * 0.18) + ')'; cc.fillRect(0, 0, W, H); }
+  if (data.rainfall > 0.15) { cc.strokeStyle = 'rgba(80,120,180,' + (data.rainfall * 0.06) + ')'; cc.lineWidth = 0.6; for (var ri = 0; ri < data.rainfall * 60; ri++) { var rrx = rand(0, W), rry = rand(0, H * 0.3); cc.beginPath(); cc.moveTo(rrx, rry); cc.lineTo(rrx - 1, rry + rand(10, 25)); cc.stroke(); } }
+  for (var ssi = 0; ssi < state.snow.length; ssi++) { state.snow[ssi].update(); state.snow[ssi].draw(cc); }
+  var mx = mouse.x, my = mouse.y;
+  var sorted = state.jf.slice().sort(function(a, b) { return a.layer - b.layer; });
+  for (var ji = 0; ji < sorted.length; ji++) { var jf = sorted[ji]; var d2 = jf.detail === 'full' ? data : null; var st2 = jf.update(frame, d2, W, H, jf.detail === 'full' ? mx : null, my); jf.draw(cc, frame, d2, st2); }
+  var vG = cc.createRadialGradient(W / 2, H / 2, W * 0.15, W / 2, H / 2, W * 0.8);
+  vG.addColorStop(0, 'rgba(0,0,0,0)'); vG.addColorStop(1, 'rgba(0,0,0,0.5)');
+  cc.fillStyle = vG; cc.fillRect(0, 0, W, H);
+  requestAnimationFrame(drawFrame);
+}
+
+// ============================================================
+// RESIZE + EVENTS
+// ============================================================
+function resize() {
+  var stage = document.getElementById('stage');
+  canvas.width = stage.clientWidth;
+  canvas.height = stage.clientHeight;
+  state.ready = false;
+}
+window.addEventListener('resize', resize);
+resize();
+
+canvas.addEventListener('mousemove', function(e) {
+  var r = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top;
+  if (audioOn && Math.random() < 0.08) audio.playBubble();
+});
+canvas.addEventListener('mouseleave', function() { mouse.x = null; mouse.y = null; });
+canvas.addEventListener('click', function(e) {
+  var r = canvas.getBoundingClientRect();
+  var hero = state.jf[0];
+  if (hero) hero.addRipple(e.clientX - r.left, e.clientY - r.top);
+  if (audioOn) audio.playPulse();
+});
+
+// ============================================================
+// UI CONTROLS
+// ============================================================
+var clockEl = document.getElementById('clock');
+var readingsEl = document.getElementById('readings');
+var clockWrap = document.getElementById('clock-wrap');
+var simBtnsEl = document.getElementById('simBtns');
+
+function updateUI() {
+  clockWrap.style.display = mode === 'live' ? 'flex' : 'none';
+  readingsEl.style.display = mode === 'live' ? 'block' : 'none';
+  document.getElementById('btnLive').className = 'btn' + (mode === 'live' ? ' on' : '');
+  document.getElementById('btnSim').className = 'btn' + (mode === 'simulate' ? ' on' : '');
+  simBtnsEl.style.display = mode === 'simulate' ? 'contents' : 'none';
+}
+
+// Build sim buttons
+var sims = ['day', 'rush', 'rain', 'haze', 'night'];
+simBtnsEl.innerHTML = '<div class="sep"></div>';
+for (var si = 0; si < sims.length; si++) {
+  var b = document.createElement('button');
+  b.className = 'btn' + (scenario === sims[si] ? ' on' : '');
+  b.textContent = sims[si].charAt(0).toUpperCase() + sims[si].slice(1);
+  b.setAttribute('data-sc', sims[si]);
+  b.addEventListener('click', function() {
+    scenario = this.getAttribute('data-sc');
+    var all = simBtnsEl.querySelectorAll('.btn');
+    for (var i = 0; i < all.length; i++) all[i].className = 'btn' + (all[i].getAttribute('data-sc') === scenario ? ' on' : '');
+  });
+  simBtnsEl.appendChild(b);
+}
+
+document.getElementById('btnLive').addEventListener('click', function() { mode = 'live'; updateUI(); });
+document.getElementById('btnSim').addEventListener('click', function() { mode = 'simulate'; updateUI(); });
+document.getElementById('btnAudio').addEventListener('click', function() {
+  if (!audioOn) { if (audio.init()) { audioOn = true; this.className = 'btn on'; this.innerHTML = '&#9834; On'; } }
+  else { audioOn = false; this.className = 'btn'; this.innerHTML = '&#9834; Off'; }
+});
+
+// ============================================================
+// DATA TICK + START
+// ============================================================
+function tick() {
+  var gen = generateLiveData();
+  liveData = gen.data;
+  clockEl.textContent = formatSGTime(gen.hour);
+  readingsEl.innerHTML = '';
+  if (gen.raw.temperature) { var d = document.createElement('div'); d.textContent = gen.raw.temperature; readingsEl.appendChild(d); }
+  if (gen.raw.humidity) { var d = document.createElement('div'); d.textContent = gen.raw.humidity; readingsEl.appendChild(d); }
+  if (gen.raw.rainfall) { var d = document.createElement('div'); d.textContent = gen.raw.rainfall; readingsEl.appendChild(d); }
+  if (gen.raw.psi) { var d = document.createElement('div'); d.textContent = gen.raw.psi; readingsEl.appendChild(d); }
+}
+tick();
+setInterval(tick, 5000);
+updateUI();
+requestAnimationFrame(drawFrame);
+</script>
+</body>
+</html>

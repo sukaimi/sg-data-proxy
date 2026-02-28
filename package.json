@@ -1,8 +1,9 @@
 {
-  "name": "sg-data-proxy",
+  "name": "pulse-of-singapore",
   "version": "1.0.0",
-  "description": "Serverless proxy for Singapore NEA weather data (data.gov.sg v2 API)",
+  "description": "Artistic data visualization of Singapore rendered as animated jellyfish",
   "private": true,
+  "license": "MIT",
   "dependencies": {
     "node-fetch": "^2.7.0"
   }
